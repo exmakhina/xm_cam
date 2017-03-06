@@ -71,7 +71,7 @@ class Pipe(object):
 
 	def sendline(self, l):
 		s = self.s
-		s.send(("%s\r\n" % l).encode())
+		s.send(l.encode() + self._endline)
 
 
 class SenderGrbl(object):
