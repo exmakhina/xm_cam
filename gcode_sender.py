@@ -250,6 +250,14 @@ class SenderTrinus(object):
 					print("\x1B[31;1m%s\x1B[0m" % res)
 					resend = True
 					continue
+				elif res == "[ERROR] invalid gcode":
+					print("\x1B[31;1m%s\x1B[0m" % res)
+					resend = True
+					continue
+				elif re.match(r"\[ERROR\] gcode char invalid: '.' \([0-9A-F]{2}\)", res):
+					print("\x1B[31;1m%s\x1B[0m" % res)
+					resend = True
+					continue
 				elif re.match(r"\[(ERROR)\].*", res):
 					self._last_notices.append(res)
 					print("\x1B[31;1m%s\x1B[0m" % res)
