@@ -361,6 +361,8 @@ if __name__ == '__main__':
 							continue
 						if line.startswith("("):
 							continue
+						if line == "":
+							continue
 						line = line.split(";")[0]
 						print("Sending line % 4d" % (idx_line+1))
 					sender.queue(line)
