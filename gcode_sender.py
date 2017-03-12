@@ -71,17 +71,20 @@ class Pipe(object):
 
 	def sendline(self, l):
 		s = self.s
-		s.send(l.encode() + self._endline)
+		pkt = l.encode() + self._endline
+		s.sendall(pkt)
+		return len(pkt)
 
 
 class SenderGrbl(object):
 	queue_full_retry = 0.3
 
-	def __init__(self, pipe=None, host=None, port=None):
+	def __init__(self, pipe=None, host=None, port=None, version="1.1"):
 		if pipe is None:
 			self.pipe = pipe = Pipe(host=host, port=port, endline=b"\r\n")
 		# Initialize
 		self.verbose = verbose = True
+		self._version = version
 
 	def open(self, initial=True):
 		p = self.pipe
@@ -104,7 +107,10 @@ class SenderGrbl(object):
 		p = self.pipe
 
 		if line != "?":
-			can_send = lambda x: x["cmdbuf"] < 10 and x["rxbuf"] < 100
+			if self._version == "0.9":
+				can_send = lambda x: x["cmdbuf"] < 10 and x["rxbuf"] < 100
+			elif self._version == "1.1":
+				can_send = lambda x: x["cmdbuf"] > 2 and x["rxbuf"] > (5 + len(line))
 			self.wait_status(condition=can_send, poll_delay=self.queue_full_retry)
 
 		print("\x1B[33mNow sending %s\x1B[0m" % line)
@@ -176,7 +182,11 @@ class SenderGrbl(object):
 				print("\x1B[32m%s\x1B[0m" % res)
 				continue
 
-		m = re.match(r"<(?P<state>\S+),MPos:(?P<mpos>\S+),WPos:(?P<wpos>\S+),Buf:(?P<cmdbuf>\S+),RX:(?P<rxbuf>\S+),Ln:(?P<ln>\S+),F:(?P<feed>\S+)\.>", self.last_status)
+		if self._version == "1.1":
+			m = re.match(r"<(?P<state>[A-Za-z:0-9]+)(\|((MPos:(?P<mpos>[-\d.,]+))|(WPos:(?P<wpos>[-\d.,]+))|(WCO:[-\d.,]+)|(Bf:(?P<cmdbuf>\d+),(?P<rxbuf>\d+))|(Ln:(?P<ln>\d+))|(F:(?P<feed1>\d+))|(FS:(?P<feed2>\d+),(?P<sfeed>\d+))|(Pn:(?P<pins>\S+))|(Ov:(?P<ovf>\S+),(?P<ovr>\S+),(?P<ovs>\S+))|(\|A:\S+)))+>", self.last_status)
+		elif self._version == "0.9":
+			m = re.match(r"<(?P<state>\S+),MPos:(?P<mpos>\S+),WPos:(?P<wpos>\S+),Buf:(?P<cmdbuf>\S+),RX:(?P<rxbuf>\S+),Ln:(?P<ln>\S+),F:(?P<feed>\S+)\.>", self.last_status)
+
 		assert m is not None
 
 		res = dict(
