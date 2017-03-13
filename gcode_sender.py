@@ -236,13 +236,14 @@ class SenderTrinus(object):
 			if line.startswith("M117"):
 				return line
 
-			# Apply checksum
-			s = ("%s " % line).encode("utf-8")
-			cs = 0
-			for v in bytearray(s):
-				cs = cs ^ v
-			cs = cs & 0xff
-			return "%s *%d" % (line, cs)
+			if not "*" in line:
+				# Apply checksum
+				s = ("%s " % line).encode("utf-8")
+				cs = 0
+				for v in bytearray(s):
+					cs = cs ^ v
+				cs = cs & 0xff
+				return "%s *%d" % (line, cs)
 
 		out = shorten(line)
 
