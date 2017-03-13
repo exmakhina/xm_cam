@@ -7,11 +7,108 @@ import sys, re, io, json, warnings
 
 import numpy as np
 
+class Emitter(object):
+	"""
+	g-code post-processor that only does formatting operations
+	"""
+
+	STRIP_TRAILING_ZEROS = 1<<2
+	STRIP_SPACES = 1<<0
+	STRIP_COMMENTS = 1<<2
+	STRIP_CHECKSUMS = 1<<3
+	ADD_CHECKSUM = 1<<10
+	ADD_SPACES = 1<<11
+	CHECK_COMMENTS = 1<<20
+	CHECK_CHECKSUMS = 1<<21
+
+	def __init__(self, println, flags=0):
+		self._println = println
+		self._flags = flags
+		self._donttouch = lambda x: x.startswith("M117")
+
+	def emit(self, *args):
+		if len(args) == 1 and (isinstance(args[0], list) or isinstance(args[0], tuple)):
+			args = args[0]
+
+		flags = self._flags
+		for arg in args:
+
+			if self._donttouch(arg):
+				arg = arg.encode("ascii")
+				self._println(arg)
+				continue
+
+			if (flags & Emitter.STRIP_COMMENTS) != 0:
+				arg = arg.split(";")[0].rstrip()
+				try:
+					a = arg.index("(")
+				except ValueError:
+					a = None
+				try:
+					b = arg.rindex(")")+1
+				except ValueError:
+					b = None
+
+				if a is not None and b is not None:
+					arg = arg[:a].rstrip() + arg[b:].lstrip()
+				elif a is None and b is None:
+					pass
+				elif a is not None and (flags & Emitter.CHECK_COMMENTS) != 0:
+					raise ValueError(arg)
+				elif b is not None and (flags & Emitter.CHECK_COMMENTS) != 0:
+					raise ValueError(arg)
+
+			if (flags & Emitter.STRIP_TRAILING_ZEROS) != 0:
+				pass
+
+			if (flags & Emitter.STRIP_SPACES) != 0:
+				arg = arg.replace(" ", "")
+
+			if (flags & Emitter.ADD_SPACES) != 0:
+				arg_out = list()
+				last_char = " "
+				comment = False
+				comment_paren = False
+				for idx_char, char in enumerate(arg):
+					if char == "(":
+						comment_paren = True
+					if char == ")":
+						comment_paren = False
+					if char == ";":
+						comment = True
+					if (not comment and not comment_paren) \
+					 and last_char in "0123456789." \
+					 and char in "EFGIJKMXYZS*":
+						arg_out.append(" ")
+					arg_out.append(char)
+					last_char = char
+				arg = "".join(arg_out)
+
+			arg = arg.encode("ascii")
+
+			if (flags & Emitter.ADD_CHECKSUM) != 0 and not b"*" in arg:
+				cs = 0
+				for x in bytearray(arg):
+					cs ^= x
+				if (flags & Emitter.STRIP_SPACES) == 0 or (flags & Emitter.ADD_SPACES) != 0:
+					arg += b" "
+				arg += ("*%d" % (cs)).encode("ascii")
+
+			self._println(arg)
+
+
 class CodeGen(object):
 	"""
 	G-code generator
 
 	Has an internal state and returns lists of gcodes per command.
+
+	Notes:
+
+	- Spaces, which are optional, are output, but they're easy to remove, so it's up to the
+	  user to do it.
+	- Checksums are not output.
+
 	"""
 	def __init__(self):
 		self.feed_height = 1
@@ -117,8 +214,44 @@ class CodeGen(object):
 
 if __name__ == "__main__":
 
+	def println(x):
+		print(b"\x1B[33;1m[" + x + b"]\x1B[0m")
+
+	flags = 0
+	flags = Emitter.STRIP_SPACES
+	flags |= Emitter.STRIP_COMMENTS
+	flags |= Emitter.ADD_CHECKSUM
+	flags |= Emitter.CHECK_COMMENTS
+	#flags |= Emitter.ADD_SPACES
+	e = Emitter(
+	 println=println,
+	 flags=flags,
+	)
+
+	e.emit("G0 X1")
+	e.emit("G0 X2", "G0 X3")
+	e.emit(("G0 X4", "G0 X5"))
+	e.emit(["G0 X6", "G0 X7"])
+
 	cg = CodeGen()
 
-	print(cg.line_to(z=2./3))
-	print(cg.line_to(z=1, extruder=4))
-	print(cg.rapid_to(x=2))
+	e.emit(cg.line_to(z=2./3))
+	e.emit(cg.line_to(z=1, extruder=4))
+	e.emit(cg.rapid_to(x=2))
+	e.emit("G0 X8 ; pouet")
+	e.emit("G0 X9 ( do something ) ; puoet")
+	e.emit("G0 X10 ( do something ) ; puoet")
+	try:
+		e.emit("G0 X11 ( do something")
+		if (flags & Emitter.CHECK_COMMENTS) != 0:
+			raise RuntimeError()
+	except ValueError:
+		pass
+	try:
+		e.emit("G0 X12 do something)")
+		if (flags & Emitter.CHECK_COMMENTS) != 0:
+			raise RuntimeError()
+	except ValueError:
+		pass
+
+	e.emit("M117 hello ! yeah; this is sick (very)")
