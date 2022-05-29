@@ -12,29 +12,16 @@ Multiple connections to it are allowed (which may be dangerous).
 import socket, select, time, sys, collections, io, os, subprocess
 import contextlib
 import logging
-import fcntl
 import shlex
+
+from ..konvini.listen_and_connect import listener_from_url
+from ..konvini.subprocess import (
+ TerminatingPopen,
+ fcntl_nonblocking,
+)
 
 
 logger = logging.getLogger()
-
-
-class TerminatingPopen(subprocess.Popen):
-	"""
-	Like subprocess.Popen but ensures the subprocess is terminated
-	when __exit__ is called.
-	"""
-	def __init__(self, cmd, **kw):
-		if os.name == "nt":
-			kw.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
-		super().__init__(cmd, **kw)
-
-	def __exit__(self, *args):
-		if os.name == "nt":
-			self.terminate()
-			os.kill(self.pid, signal.CTRL_BREAK_EVENT)
-		else:
-			super().__exit__(*args)
 
 
 def main(argv=None):
@@ -51,6 +38,12 @@ def main(argv=None):
 
 	parser.add_argument("stdio_command",
 	 help="Command to run to get stdio",
+	)
+
+
+	parser.add_argument("--listen",
+	 default="tcp://localhost:9999",
+	 help="Listen address specification",
 	)
 
 
@@ -85,18 +78,17 @@ def main(argv=None):
 			stdout = sys.stdout.buffer
 
 		for fd in (stdin, stdout):
-			flag = fcntl.fcntl(fd, fcntl.F_GETFL)
-			fcntl.fcntl(fd, fcntl.F_SETFL, flag | os.O_NONBLOCK)
-			flag = fcntl.fcntl(fd, fcntl.F_GETFL)
-			if flag & os.O_NONBLOCK == 0:
-				raise RuntimeError(f"Couldn't put {fd} as non-blocking")
+			fcntl_nonblocking(fd)
 
 		channel = []
 
-		server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-		server.bind(("127.0.0.1", 9999))
-		server.listen(5)
+		class Server:
+			def __init__(self, endpoint, handler, bind_and_activate=None):
+				self.socket = endpoint
+
+		server_ = listener_from_url(args.listen, Server, Server)
+
+		server = server_.socket
 
 		timeout = 1
 
@@ -116,7 +108,13 @@ def main(argv=None):
 					elif r is stdout:
 						data = r.read(4096)
 						name = "[{}]".format("gcode".center(4*3+3+1+5))
-						sys.stdout.write(f"\x1B[32;1m{name}\x1B[0m {data.decode('utf-8')}")
+
+						try:
+							text = data.decode("utf-8")
+						except:
+							text = repr(data) + "\n"
+
+						sys.stdout.write(f"\x1B[32;1m{name}\x1B[0m {text}")
 						sys.stdout.flush()
 						if not data:
 							logger.info("gcode server has disconnected")
@@ -128,15 +126,19 @@ def main(argv=None):
 
 					elif r in channel:
 						data = r.recv(4096)
-						host, port = r.getpeername()
-						name = "[{}]".format(f"{host}:{port}".center(4*3+3+1+5))
+						try:
+							host, port = r.getpeername()
+							endpoint = f"{host}:{port}"
+						except:
+							endpoint = "remote"
+						name = "[{}]".format(endpoint.center(4*3+3+1+5))
 						sys.stdout.write(f"\x1B[33;1m{name}\x1B[0m {data.decode('utf-8')}")
 						sys.stdout.flush()
 						if data:
 							stdin.write(data)
 							stdin.flush()
 						else:
-							logger.info("%s has disconnected", r.getpeername())
+							logger.info("%s has disconnected", endpoint)
 							r.close()
 							channel.remove(r)
 		except KeyboardInterrupt:
