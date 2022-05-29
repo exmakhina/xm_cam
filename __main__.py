@@ -16,7 +16,7 @@ def main(args=None):
 	import argparse
 
 	parser = argparse.ArgumentParser(
-	 description="Symbol Barcode Reader Tool",
+	 description="CAM CLI",
 	)
 
 	parser.add_argument("--log-level",
@@ -71,13 +71,37 @@ def main(args=None):
 	subp.set_defaults(func=do_meshconv)
 
 
+	subp = subparsers.add_parser(
+	 "gcode_proxy",
+	 help="Run gcode proxy",
+	)
+
+	def do_gcode_proxy(args):
+		from .gcode_proxy import main
+		return main(rest)
+
+	subp.set_defaults(func=do_gcode_proxy)
+
+
+	subp = subparsers.add_parser(
+	 "gcode_sender",
+	 help="Run gcode sender",
+	)
+
+	def do_gcode_sender(args):
+		from .gcode_sender import main
+		return main(rest)
+
+	subp.set_defaults(func=do_gcode_sender)
+
+
 	try:
 		import argcomplete
 		argcomplete.autocomplete(parser)
 	except:
 		pass
 
-	args = parser.parse_args()
+	args, rest = parser.parse_known_args(args)
 
 	logging.basicConfig(
 	 datefmt="%Y%m%dT%H%M%S",
