@@ -3,105 +3,75 @@
 # PYTHON_ARGCOMPLETE_OK
 # g-code sender
 
-import socket, io, re, time, sys, binascii, collections
+import sys, io, os
+import re
+import time
+import subprocess
+import collections
+import logging
+import contextlib
+import shlex
 
+from ..konvini.subprocess import (
+ TerminatingPopen,
+)
+
+logger = logging.getLogger(__name__)
 
 class Pipe(object):
 	"""
 	TCP connector
 	"""
-	def __init__(self, host=None, port=None, endline=b"\n"):
-		self.s = s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		self.verbose = False
-		self.host = host or "localhost"
-		self.port = port or 9999
+	def __init__(self, stdin=None, stdout=None, endline=b"\n"):
+		self.stdin = stdin
+		self.stdout = stdout
+		self.verbose = True
 		self._endline = endline
-
-	def open(self):
-		s = self.s
-		s.connect((self.host, self.port))
-		s.settimeout(2.0)
-
-	def close(self):
-		s = self.s
-		s.close()
+		logger.debug("endline: “%s”", endline)
 
 	def readline(self, timeout=None):
-		s = self.s
+		"""
+		"""
+
 		buf = io.BytesIO()
-		while True:
-			if self.verbose:
-				print("Reading")
-			try:
-				data = s.recv(180, socket.MSG_PEEK)
-			except socket.timeout as e:
-				return None
-			except socket.error as e:
-				print("Exception %s" % e)
-				time.sleep(0.1)
-				continue
-			if self.verbose:
-				print("Read %d: %s" % (len(data), binascii.hexlify(data)))
-			for i in range(len(data)):
-				if data[i] == b"\n":
-					discard = i+1
-					if self.verbose:
-						print("Discarding %d: %s" % (discard, binascii.hexlify(data[:discard])))
-					trash = s.recv(discard)
-					if self.verbose:
-						print("Discarded %s" % (binascii.hexlify(trash)))
-
-						if self.verbose:
-							print("Returning!")
-					try:
-						if self._endline == b"\r\n":
-							end = -1
-						else:
-							end = None
-						return buf.getvalue()[:end].decode()
-					except UnicodeDecodeError:
-						return "???"
-				if self.verbose:
-					print("Adding %s" % (data[i]))
-				buf.write(data[i])
-
-			trash = s.recv(len(data))
-			if self.verbose:
-				print("Discarded %s" % (binascii.hexlify(trash)))
+		while not buf.getvalue().endswith(self._endline):
+			data = self.stdout.read(1)
+			buf.write(data)
+		return buf.getvalue()[:-len(self._endline)].decode("utf-8")
 
 	def sendline(self, l):
-		s = self.s
 		pkt = l.encode() + self._endline
-		s.sendall(pkt)
-		return len(pkt)
+		x = self.stdin.write(pkt)
+		self.stdin.flush()
+		return x # len(pkt)
 
 
 class SenderGrbl(object):
+	"""
+	"""
 	queue_full_retry = 0.3
 
-	def __init__(self, pipe=None, host=None, port=None, version="1.1"):
+	def __init__(self, pipe=None, stdin=None, stdout=None, version="1.1"):
 		if pipe is None:
-			self.pipe = pipe = Pipe(host=host, port=port, endline=b"\r\n")
+			self.pipe = pipe = Pipe(stdin=stdin, stdout=stdout, endline=b"\r\n")
 		# Initialize
 		self.verbose = verbose = True
 		self._version = version
+		self._bufsize = 128 - 30 # keep room for values entered manually out of band
+		self._bufavail = self._bufsize
 
 	def open(self, initial=True):
 		p = self.pipe
-		p.open()
 		if initial:
-			print("Initializing grbl...")
+			logger.info("Initializing grbl...")
 			p.sendline("")
 			p.sendline("")
 			while True:
 				res = p.readline()
 				if res is None:
 					break
-				print("\x1B[32m%s\x1B[0m" % res)
+				logger.info("\x1B[32m%s\x1B[0m", res)
 
-	def close(self):
-		p = self.pipe
-		p.close()
 
 	def queue(self, line):
 		p = self.pipe
@@ -113,7 +83,7 @@ class SenderGrbl(object):
 				can_send = lambda x: x["cmdbuf"] > 2 and x["rxbuf"] > (5 + len(line))
 			self.wait_status(condition=can_send, poll_delay=self.queue_full_retry)
 
-		print("\x1B[33mNow sending %s\x1B[0m" % line)
+		logger.info("\x1B[33mNow sending %s\x1B[0m", line)
 		p.sendline(line)
 
 
@@ -127,30 +97,30 @@ class SenderGrbl(object):
 				continue
 			if re.match(r"\[.*\]", res):
 				self.last_notice = res
-				print("\x1B[32m%s\x1B[0m" % res)
+				logger.info("\x1B[32m%s\x1B[0m", res)
 				continue
 			if re.match(r"<.*>", res):
 				self.last_status = res
-				print("\x1B[32m%s\x1B[0m" % res)
+				logger.info("\x1B[32m%s\x1B[0m", res)
 				continue
 			break
 
-		print("\x1B[32m%s\x1B[0m" % res)
+		logger.info("\x1B[32m%s\x1B[0m", res)
 		assert res == "ok", res
 
 		if line == "M2":
 			"""
 			grbl outputs extra info when M2 is said
 			"""
-			print("\x1B[31mM2\x1B[0m")
+			logger.info("\x1B[31mM2\x1B[0m")
 			x = p.readline()
-			print("\x1B[32m%s\x1B[0m" % x)
+			logger.info("\x1B[32m%s\x1B[0m", x)
 			x = p.readline()
-			print("\x1B[32m%s\x1B[0m" % x)
+			logger.info("\x1B[32m%s\x1B[0m", x)
 			x = p.readline()
-			print("\x1B[32m%s\x1B[0m" % x)
+			logger.info("\x1B[32m%s\x1B[0m", x)
 			x = p.readline()
-			print("\x1B[32m%s\x1B[0m" % x)
+			logger.info("\x1B[32m%s\x1B[0m", x)
 
 		return res
 
@@ -175,11 +145,11 @@ class SenderGrbl(object):
 				continue
 			if re.match(r"\[.*\]", res):
 				self.last_notice = res
-				print("\x1B[32m%s\x1B[0m" % res)
+				logger.info("\x1B[32m%s\x1B[0m", res)
 				continue
 			if re.match(r"<.*>", res):
 				self.last_status = res
-				print("\x1B[32m%s\x1B[0m" % res)
+				logger.info("\x1B[32m%s\x1B[0m", res)
 				continue
 
 		if self._version == "1.1":
@@ -189,6 +159,8 @@ class SenderGrbl(object):
 
 		assert m is not None
 
+		#print(m.groups())
+
 		res = dict(
 		 state=m.group("state"),
 		 cmdbuf=int(m.group("cmdbuf")),
@@ -197,42 +169,42 @@ class SenderGrbl(object):
 
 		return res
 
-	def close(self):
-		p = self.pipe
-		p.close()
-
 
 class SenderTrinus(object):
 
-	def __init__(self, pipe=None, host=None, port=None):
+	def __init__(self, pipe=None, stdin=None, stdout=None):
 		if pipe is None:
-			self.pipe = pipe = Pipe(host=host, port=port, endline=b"\n")
+			self.pipe = pipe = Pipe(stdin=stdin, stdout=stdout, endline=b"\n")
 		# Initialize
 		self.verbose = verbose = True
 		self._last_notices = collections.deque()
 
 	def open(self, initial=True):
 		p = self.pipe
-		p.open()
 		if initial:
-			print("Initializing TODO...")
+			logger.info("Initializing TODO...")
 			p.sendline("")
 			p.sendline("")
 			while True:
 				res = p.readline()
 				if res is None:
 					break
-				print("\x1B[32m%s\x1B[0m" % res)
-
-	def close(self):
-		p = self.pipe
-		p.close()
+				logger.info("\x1B[32m%s\x1B[0m", res)
 
 	def queue(self, line):
 		p = self.pipe
 
 		def shorten(line):
 			line = line.split(";")[0].rstrip()
+
+			if line in (
+			 "G21",
+			 "G90",
+			 "M82",
+			 "M600", # Filament change
+			 ):
+				# Unsupported commands
+				return
 			if line.startswith("M117"):
 				return line
 
@@ -247,8 +219,11 @@ class SenderTrinus(object):
 
 		out = shorten(line)
 
+		if out is None:
+			return
+
 		while True:
-			print("\x1B[33mNow sending %s (%s)\x1B[0m" % (out, line))
+			logger.info("\x1B[33m> %s\x1B[0m", out)
 			p.sendline(out)
 
 			resend = False
@@ -258,35 +233,39 @@ class SenderTrinus(object):
 					time.sleep(0.1)
 					continue
 				elif res == "[ERROR] invalid checksum":
-					print("\x1B[31;1m%s\x1B[0m" % res)
+					logger.info("\x1B[31;1m< %s\x1B[0m", res)
 					resend = True
 					continue
 				elif res == "[ERROR] invalid gcode":
-					print("\x1B[31;1m%s\x1B[0m -> assuming it was a corruption" % res)
+					logger.info("\x1B[31;1m< %s\x1B[0m -> assuming it was a corruption", res)
+					resend = True
+					continue
+				elif res == "[ERROR] too long extrusion prevented":
+					logger.info("\x1B[31;1m< %s\x1B[0m -> assuming it was a corruption", res)
 					resend = True
 					continue
 				elif res == "[ERROR] unknown command":
-					print("\x1B[31;1m%s\x1B[0m -> assuming it was a corruption" % res)
+					logger.info("\x1B[31;1m< %s\x1B[0m -> assuming it was a corruption", res)
 					resend = True
 					continue
 				elif re.match(r"\[ERROR\] gcode char invalid: '.' \([0-9A-F]{2}\)", res):
-					print("\x1B[31;1m%s\x1B[0m" % res)
+					logger.info("\x1B[31;1m< %s\x1B[0m", res)
 					resend = True
 					continue
 				elif re.match(r"\[(ERROR)\].*", res):
 					self._last_notices.append(res)
-					print("\x1B[31;1m%s\x1B[0m" % res)
+					logger.info("\x1B[31;1m< %s\x1B[0m", res)
 					raise RuntimeError(res)
 					continue
 				elif re.match(r"\[(ECHO|VALUE)\].*", res):
 					self._last_notices.append(res)
-					print("\x1B[32m%s\x1B[0m" % res)
+					logger.info("\x1B[32m< %s\x1B[0m", res)
 					continue
 				elif res == "ok":
-					print("\x1B[32m%s\x1B[0m" % res)
+					logger.info("\x1B[32m< %s\x1B[0m", res)
 					break
 				else:
-					print("\x1B[35;1m%s\x1B[0m" % res)
+					logger.info("\x1B[35;1m< %s\x1B[0m", res)
 					continue
 
 			if not resend:
@@ -294,12 +273,95 @@ class SenderTrinus(object):
 
 		return res
 
+
+class SenderMarlin(object):
+
+	def __init__(self, pipe=None, stdin=None, stdout=None):
+		if pipe is None:
+			self.pipe = pipe = Pipe(stdin=stdin, stdout=stdout, endline=b"\n")
+		# Initialize
+		self.verbose = verbose = True
+		self._last_notices = collections.deque()
+
+	def open(self, initial=True):
+		p = self.pipe
+		if initial:
+			logger.info("Initializing TODO...")
+			p.sendline("")
+			p.sendline("")
+			while True:
+				res = p.readline()
+				if res is None:
+					break
+				logger.info("\x1B[32m%s\x1B[0m", res)
+
 	def close(self):
 		p = self.pipe
 		p.close()
 
+	def queue(self, line):
+		p = self.pipe
 
-if __name__ == '__main__':
+		def shorten(line):
+			line = line.split(";")[0].rstrip()
+
+			if line in (
+			 "G21",
+			 "G90",
+			 "M82",
+			 "M600", # Filament change
+			 ):
+				# Unsupported commands
+				return
+			if line.startswith("M117"):
+				return line
+
+			if not "*" in line:
+				# Apply checksum
+				s = ("%s " % line).encode("utf-8")
+				cs = 0
+				for v in bytearray(s):
+					cs = cs ^ v
+				cs = cs & 0xff
+				return "%s *%d" % (line, cs)
+
+		out = shorten(line)
+
+		if out is None:
+			return
+
+		while True:
+			logger.info("\x1B[33mNow sending %s (%s)\x1B[0m", out, line)
+			p.sendline(out)
+
+			resend = False
+			while True:
+				res = p.readline()
+				if res is None:
+					time.sleep(0.1)
+					continue
+				elif res.startswith("echo:"):
+					self._last_notices.append(res)
+					logger.info("\x1B[32m%s\x1B[0m", res)
+					continue
+				elif res == "ok":
+					logger.info("\x1B[32m%s\x1B[0m", res)
+					break
+				else:
+					logger.info("\x1B[35;1m“%s”\x1B[0m", res)
+					continue
+
+			if not resend:
+				break
+
+		return res
+
+
+
+def main(args=None):
+
+	if args is None:
+		args = sys.argv[1:]
 
 	import argparse
 
@@ -307,20 +369,18 @@ if __name__ == '__main__':
 	 description="g-code sender",
 	)
 
-	parser.add_argument("--host",
-	 help="hostname for TCP/IP connection to GRBL bridge",
-	 default="localhost",
+	parser.add_argument("--log-level",
+	 default="INFO",
+	 help="Logging level (eg. INFO, see Python logging docs)",
 	)
 
-	parser.add_argument("--port",
-	 help="port number for TCP/IP connection to GRBL bridge",
-	 default=9999,
-	 type=int,
+	parser.add_argument("--stdio-command",
+	 help="Command to access g-code server",
 	)
 
 	parser.add_argument("--protocol",
 	 help="protocol type",
-	 choices=("grbl", "trinus"),
+	 choices=("grbl", "trinus", "marlin"),
 	 default="grbl",
 	)
 
@@ -334,6 +394,12 @@ if __name__ == '__main__':
 	 help="manage sending of g-code files to grbl",
 	)
 
+	parser_send.add_argument("--start-line",
+	 help="line from which to start sending",
+	 type=int,
+	 default=1,
+	)
+
 	parser_send.add_argument("filename",
 	 help="file to send",
 	)
@@ -344,78 +410,89 @@ if __name__ == '__main__':
 	except:
 		pass
 
-	args = parser.parse_args()
+	args = parser.parse_args(args)
 
-	if args.protocol == "trinus":
-		sender = SenderTrinus(
-		 host=args.host,
-		 port=args.port,
-		)
-	elif args.protocol == "grbl":
-		sender = SenderGrbl(
-		 host=args.host,
-		 port=args.port,
-		)
+	logging.basicConfig(
+	 datefmt="%Y%m%dT%H%M%S",
+	 level=getattr(logging, args.log_level),
+	 format="%(asctime)-15s %(name)s %(levelname)s %(message)s"
+	)
 
-	if 0:
-		pass
+	with contextlib.ExitStack() as stack:
+		if args.stdio_command is not None:
+			cmd = shlex.split(args.stdio_command)
+			proc = TerminatingPopen(cmd,
+			 stdin=subprocess.PIPE,
+			 stdout=subprocess.PIPE,
+			)
 
-	elif args.command == "send":
-		sender.open(initial=False)
-		print("Sending %s" % args.filename)
+			stack.enter_context(proc)
 
-		idx_line = 1
-		try:
-			with io.open(args.filename, "r") as f:
-				for idx_line, line in enumerate(f):
-					if re.match(r".*\*\d+", line):
-						""" Don't touch """
-					else:
-						line = line.rstrip()
-						if line.startswith("%"):
-							continue
-						if line.startswith("("):
-							continue
-						if line == "":
-							continue
-						line = line.split(";")[0]
-						print("Sending line % 4d" % (idx_line+1))
-					sender.queue(line)
-					idx_line += 1
-		except KeyboardInterrupt:
-			pass
-
-		print("Last line sent is %d" % idx_line)
-
-		if args.protocol == "grbl":
-			idle_p = lambda x: x["state"] == "Idle"
-			sender.wait_status(condition=idle_p)
+			stdin = proc.stdin
+			stdout = proc.stdout
 		else:
-			print("\x1B[33mCaution, wait for remaining commands to be purged!\x1B[0m")
+			stdin = sys.stdin.buffer
+			stdout = sys.stdout.buffer
 
-		sender.close()
+
+		if args.protocol == "trinus":
+			sender = SenderTrinus(
+			 stdin=stdin,
+			 stdout=stdout,
+			)
+		elif args.protocol == "grbl":
+			sender = SenderGrbl(
+			 stdin=stdin,
+			 stdout=stdout,
+			)
+		elif args.protocol == "marlin":
+			sender = SenderMarlin(
+			 stdin=stdin,
+			 stdout=stdout,
+			)
 
 		if 0:
-			p = Pipe()
-			p.open()
-			p.sendline("?")
-			res = p.readline()
-			print("\x1B[32m%s\x1B[0m" % res)
-			res = p.readline()
-			print("\x1B[32m%s\x1B[0m" % res)
-			res = p.readline()
-			print("\x1B[32m%s\x1B[0m" % res)
-			p.sendline("?")
-			res = p.readline()
-			print("\x1B[32m%s\x1B[0m" % res)
+			pass
 
-			res = p.readline()
-			print("\x1B[32m%s\x1B[0m" % res)
+		elif args.command == "send":
+			sender.open(initial=False)
+			logger.info("Sending %s", args.filename)
 
-			time.sleep(1)
-			p.sendline("?")
-			res = p.readline()
-			print("\x1B[32m%s\x1B[0m" % res)
+			idx_line = 1
+			try:
+				with io.open(args.filename, "r") as f:
+					for idx_line, line in enumerate(f):
+						if idx_line+1 < args.start_line:
+							continue
+						line = line.rstrip()
+						logger.info("Processing line % 4d (%s)", idx_line+1, line)
+						if re.match(r".*\*\d+", line):
+							""" Don't touch """
+						else:
+							if line.startswith("%"):
+								continue
+							if line.startswith("("):
+								continue
+							if line == "":
+								continue
+							line = line.split(";")[0].strip()
+							if line == "":
+								continue
+							logger.info("Queueing line % 4d (%s)", idx_line+1, line)
+						sender.queue(line)
 
-			p.close()
+			except KeyboardInterrupt:
+				pass
 
+			logger.info("Last line sent is %d", idx_line+1)
+
+			if args.protocol == "grbl":
+				idle_p = lambda x: x["state"] == "Idle"
+				sender.wait_status(condition=idle_p)
+			else:
+				logger.info("\x1B[33mCaution, wait for remaining commands to be purged!\x1B[0m")
+
+
+if __name__ == "__main__":
+	ret = main()
+	raise SystemExit(ret)
